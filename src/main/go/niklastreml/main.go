@@ -2,17 +2,23 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/exp/mmap"
 )
 
 const (
 	filename = "measurements.txt"
+	lines    = 100_000_000
 )
 
-var name, number string
+type TempCity struct {
+	Name        string
+	Temperature int
+}
 
 func main() {
 	reader, err := mmap.Open(filename)
@@ -21,29 +27,58 @@ func main() {
 	}
 	defer reader.Close()
 
-	results := map[string]*Result{}
+	workers :=  runtime.NumCPU()
+	cResults := make(chan TempCity, workers)
 
-	for i := 0; i < reader.Len(); {
-		var b int
-		name, number, b = ReadLine(reader, i)
-		temperature := parseFloatIntoInt(number)
+	chunkSize := lines / workers
 
-		if v, ok := results[name]; !ok {
-			results[name] = &Result{
-				temperature, temperature, temperature, 1,
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	for w := range workers {
+		go func(start, end int) {
+			fmt.Println("starting worker", start, end)
+			// move forward to first newline
+			for i := start; ; i++ {
+				if reader.At(i) == '\n' {
+					start = i + 1
+					break
+				}
 			}
-		} else {
-			v.Amount++
-			v.Sum += temperature
-			if v.Min > temperature {
-				v.Min = temperature
-			} else if v.Max < temperature {
-				v.Max = temperature
+
+			for i := start; i < end; {
+				var b int
+				name, number, b := ReadLine(reader, i)
+				temperature := parseFloatIntoInt(number)
+				cResults <- TempCity{name, temperature}
+
+				i += b + 1
 			}
-		}
-		i += b + 1
+
+			wg.Done()
+		}(w*chunkSize, w*chunkSize+chunkSize)
 	}
 
+	results := map[string]*Result{}
+	go func() {
+		for tc := range cResults {
+			if v, ok := results[tc.Name]; !ok {
+				results[tc.Name] = &Result{
+					tc.Temperature, tc.Temperature, tc.Temperature, 1,
+				}
+			} else {
+				v.Amount++
+				v.Sum += tc.Temperature
+				if v.Min > tc.Temperature {
+					v.Min = tc.Temperature
+				} else if v.Max < tc.Temperature {
+					v.Max = tc.Temperature
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
 	for k, v := range results {
 		fmt.Println(k, v.Min, v.Sum/v.Amount, v.Max)
 	}
