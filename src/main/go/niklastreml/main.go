@@ -1,59 +1,96 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
+
+	"golang.org/x/exp/mmap"
 )
 
 const (
 	filename = "measurements.txt"
 )
 
+var name, number string
+
 func main() {
-	f, err := os.Open(filename)
+	reader, err := mmap.Open(filename)
 	if err != nil {
 		panic(err)
 	}
-	defer f.Close()
+	defer reader.Close()
 
-	s := bufio.NewScanner(f)
+	results := map[string]*Result{}
 
-	out := map[string]Result{}
+	for i := 0; i < reader.Len(); {
+		var b int
+		name, number, b = ReadLine(reader, i)
+		temperature := parseFloatIntoInt(number)
 
-	for s.Scan() {
-		station, measurement := ParseLine(s.Text())
-		if r, ok := out[station]; !ok {
-			out[station] = Result{
-				measurement, measurement, measurement, 1,
+		if v, ok := results[name]; !ok {
+			results[name] = &Result{
+				temperature, temperature, temperature, 1,
 			}
 		} else {
-			if r.Min > measurement {
-				r.Min = measurement
-			} else if r.Max < measurement {
-				r.Max = measurement
+			v.Amount++
+			v.Sum += temperature
+			if v.Min > temperature {
+				v.Min = temperature
+			} else if v.Max < temperature {
+				v.Max = temperature
 			}
+		}
+		i += b + 1
+	}
 
-			r.Sum += measurement
-			r.Amount++
+	for k, v := range results {
+		fmt.Println(k, v.Min, v.Sum/v.Amount, v.Max)
+	}
+}
 
-			out[station] = r
+// ReadLine reads one line from reader and reads it into a name and number string
+// start should be the adress of the beginning of the line
+func ReadLine(reader *mmap.ReaderAt, start int) (string, string, int) {
+	nameBuilder := strings.Builder{}
+	numberBuilder := strings.Builder{}
+	nameDone := false
+
+	readBytes := 0
+	for ; ; readBytes++ {
+		b := reader.At(start + readBytes)
+		if b == '\n' {
+			break
+		}
+		if b != ';' {
+			if nameDone {
+				numberBuilder.WriteByte(b)
+				continue
+			} else {
+				nameBuilder.WriteByte(b)
+			}
+		} else {
+			nameDone = true
 		}
 	}
 
-	for k, v := range out {
+	return nameBuilder.String(), numberBuilder.String(), readBytes
+}
 
-		meanInt := v.Sum / v.Amount
-
-		mean := buildNumber(meanInt)
-		min := buildNumber(v.Min)
-		max := buildNumber(v.Max)
-
-		fmt.Printf("%s;%s;%s;%s\n", k, min, mean, max)
+func parseFloatIntoInt(f string) int {
+	s := strings.Builder{}
+	for _, c := range f {
+		if c != '.' {
+			s.WriteRune(c)
+		}
 	}
 
+	i, err := strconv.ParseInt(s.String(), 10, 32)
+	if err != nil {
+		panic(err)
+	}
+
+	return int(i)
 }
 
 func buildNumber(num int64) string {
@@ -80,10 +117,10 @@ func abs(value int64) int64 {
 }
 
 type Result struct {
-	Min    int64
-	Max    int64
-	Sum    int64
-	Amount int64
+	Min    int
+	Max    int
+	Sum    int
+	Amount int
 }
 
 func ParseLine(s string) (station string, measurement int64) {
