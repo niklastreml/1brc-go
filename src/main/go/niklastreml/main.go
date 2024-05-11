@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,7 +13,7 @@ import (
 
 const (
 	filename = "measurements.txt"
-	lines    = 100_000_000
+	lines    = 1_000_000_000
 )
 
 type TempCity struct {
@@ -25,15 +26,17 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
 	defer reader.Close()
 
-	workers :=  runtime.NumCPU()
-	cResults := make(chan TempCity, workers)
+	workers := runtime.NumCPU()
 
 	chunkSize := lines / workers
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
+
+	results := Map[string, Result]{}
 
 	for w := range workers {
 		go func(start, end int) {
@@ -50,7 +53,24 @@ func main() {
 				var b int
 				name, number, b := ReadLine(reader, i)
 				temperature := parseFloatIntoInt(number)
-				cResults <- TempCity{name, temperature}
+
+				if v, ok := results.Load(name); !ok {
+					r := Result{
+						temperature, temperature, temperature, 1,
+					}
+
+					results.Store(name, r)
+				} else {
+					v.Amount++
+					v.Sum += temperature
+					if v.Min > temperature {
+						v.Min = temperature
+					} else if v.Max < temperature {
+						v.Max = temperature
+					}
+
+					results.Store(name, v)
+				}
 
 				i += b + 1
 			}
@@ -59,29 +79,25 @@ func main() {
 		}(w*chunkSize, w*chunkSize+chunkSize)
 	}
 
-	results := map[string]*Result{}
-	go func() {
-		for tc := range cResults {
-			if v, ok := results[tc.Name]; !ok {
-				results[tc.Name] = &Result{
-					tc.Temperature, tc.Temperature, tc.Temperature, 1,
-				}
-			} else {
-				v.Amount++
-				v.Sum += tc.Temperature
-				if v.Min > tc.Temperature {
-					v.Min = tc.Temperature
-				} else if v.Max < tc.Temperature {
-					v.Max = tc.Temperature
-				}
-			}
-		}
-	}()
-
 	wg.Wait()
-	for k, v := range results {
-		fmt.Println(k, v.Min, v.Sum/v.Amount, v.Max)
+	// results.Range(func(k string, v Result) bool {
+	// 	fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
+	// 	return true
+	// })
+
+	keys := []string{}
+	results.Range(func(k string, _ Result) bool {
+		keys = append(keys, k)
+		return true
+	})
+
+	slices.Sort(keys)
+
+	for _, k := range keys {
+		v, _ := results.Load(k)
+		fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	}
+
 }
 
 // ReadLine reads one line from reader and reads it into a name and number string
@@ -128,10 +144,10 @@ func parseFloatIntoInt(f string) int {
 	return int(i)
 }
 
-func buildNumber(num int64) string {
+func buildNumber(num int) string {
 	b := strings.Builder{}
 	b.Grow(4)
-	s := strconv.FormatInt(num/10, 10)
+	s := strconv.FormatInt(int64(num/10), 10)
 
 	b.WriteString(s)
 	b.WriteByte('.')
@@ -140,15 +156,6 @@ func buildNumber(num int64) string {
 	b.WriteByte(byte(v))
 
 	return b.String()
-}
-
-func abs(value int64) int64 {
-	// evil bitshift hack fml
-	temp := value >> 63
-	value = value ^ temp
-	value = value + temp&1
-
-	return value
 }
 
 type Result struct {
@@ -177,3 +184,31 @@ func ParseLine(s string) (station string, measurement int64) {
 	}
 	return station, measurement
 }
+
+type Map[K comparable, V any] struct {
+	m sync.Map
+}
+
+func (m *Map[K, V]) Delete(key K) { m.m.Delete(key) }
+func (m *Map[K, V]) Load(key K) (value V, ok bool) {
+	v, ok := m.m.Load(key)
+	if !ok {
+		return value, ok
+	}
+	return v.(V), ok
+}
+func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
+	v, loaded := m.m.LoadAndDelete(key)
+	if !loaded {
+		return value, loaded
+	}
+	return v.(V), loaded
+}
+func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	a, loaded := m.m.LoadOrStore(key, value)
+	return a.(V), loaded
+}
+func (m *Map[K, V]) Range(f func(key K, value V) bool) {
+	m.m.Range(func(key, value any) bool { return f(key.(K), value.(V)) })
+}
+func (m *Map[K, V]) Store(key K, value V) { m.m.Store(key, value) }
