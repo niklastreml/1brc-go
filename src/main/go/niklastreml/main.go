@@ -29,18 +29,33 @@ func main() {
 
 	defer reader.Close()
 
-	workers := runtime.NumCPU()
+	workers := runtime.NumCPU() * 128
+
+	fmt.Println("Running with", workers, "workers")
 
 	chunkSize := lines / workers
+
+	// f, err := os.Create("profile.prof")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer f.Close()
+	// if err := pprof.StartCPUProfile(f); err != nil {
+	// 	panic(err)
+	// }
+	// defer pprof.StopCPUProfile()
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
 
-	results := Map[string, Result]{}
+	results := make([]map[string]Result, workers)
+	for i := range results {
+		results[i] = map[string]Result{}
+	}
 
 	for w := range workers {
-		go func(start, end int) {
-			fmt.Println("starting worker", start, end)
+		go func(w, start, end int) {
+			// fmt.Println("starting worker", w, start, end)
 			// move forward to first newline
 			for i := start; ; i++ {
 				if reader.At(i) == '\n' {
@@ -54,12 +69,12 @@ func main() {
 				name, number, b := ReadLine(reader, i)
 				temperature := parseFloatIntoInt(number)
 
-				if v, ok := results.Load(name); !ok {
+				if v, ok := results[w][name]; !ok {
 					r := Result{
 						temperature, temperature, temperature, 1,
 					}
 
-					results.Store(name, r)
+					results[w][name] = r
 				} else {
 					v.Amount++
 					v.Sum += temperature
@@ -69,14 +84,14 @@ func main() {
 						v.Max = temperature
 					}
 
-					results.Store(name, v)
+					results[w][name] = v
 				}
 
 				i += b + 1
 			}
 
 			wg.Done()
-		}(w*chunkSize, w*chunkSize+chunkSize)
+		}(w, w*chunkSize, w*chunkSize+chunkSize)
 	}
 
 	wg.Wait()
@@ -84,17 +99,36 @@ func main() {
 	// 	fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	// 	return true
 	// })
+	final := map[string]Result{}
+
+	for _, m := range results {
+		for k, originalV := range m {
+			if finalV, ok := final[k]; ok {
+				if finalV.Max < originalV.Max {
+					finalV.Max = originalV.Max
+				}
+				if finalV.Min > originalV.Min {
+					finalV.Min = originalV.Min
+				}
+
+				finalV.Sum += originalV.Sum
+				finalV.Amount += originalV.Amount
+				final[k] = finalV
+			} else {
+				final[k] = originalV
+			}
+		}
+	}
 
 	keys := []string{}
-	results.Range(func(k string, _ Result) bool {
+	for k, _ := range final {
 		keys = append(keys, k)
-		return true
-	})
+	}
 
 	slices.Sort(keys)
 
 	for _, k := range keys {
-		v, _ := results.Load(k)
+		v, _ := final[k]
 		fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	}
 
@@ -105,6 +139,10 @@ func main() {
 func ReadLine(reader *mmap.ReaderAt, start int) (string, string, int) {
 	nameBuilder := strings.Builder{}
 	numberBuilder := strings.Builder{}
+
+	nameBuilder.Grow(10)
+	// a number is at least 3 bytes long
+	numberBuilder.Grow(3)
 	nameDone := false
 
 	readBytes := 0
