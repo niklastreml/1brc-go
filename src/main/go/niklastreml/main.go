@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -31,7 +30,7 @@ func main() {
 
 	defer reader.Close()
 
-	workers := runtime.NumCPU()
+	workers := runtime.NumCPU() * 128
 
 	fmt.Println("Running with", workers, "workers")
 
@@ -58,10 +57,12 @@ func main() {
 		go func(w, start, end int) {
 			// fmt.Println("starting worker", w, start, end)
 			// move forward to first newline
-			for i := start; ; i++ {
-				if reader.At(i) == '\n' {
-					start = i + 1
-					break
+			if start != 0 {
+				for i := start; ; i++ {
+					if reader.At(i) == '\n' {
+						start = i + 1
+						break
+					}
 				}
 			}
 
@@ -90,9 +91,10 @@ func main() {
 
 				i += b + 1
 
-				if i > chunkSize/3 {
-					break
-				}
+				// reduce for testing
+				// if i > chunkSize/3 {
+				// 	break
+				// }
 			}
 
 			results <- result
@@ -142,7 +144,7 @@ func main() {
 
 	for _, k := range keys {
 		v, _ := final[k]
-		fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
+		fmt.Printf("%s;%.1f;%.1f;%.1f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	}
 
 }
@@ -198,7 +200,7 @@ func parseFloatIntoInt(f [5]byte) int {
 			continue
 		}
 		scalar := b - zero
-		asInt += int(float64(scalar) * math.Pow(float64(10), float64(mult)))
+		asInt += int(scalar) * ipow(10, mult)
 		mult++
 	}
 
@@ -206,18 +208,22 @@ func parseFloatIntoInt(f [5]byte) int {
 		asInt = -asInt
 	}
 
-
 	return asInt
 }
 
-func Pow(n, exp int) int {
-	r := 0
-
-	for range exp {
-		r += n * n
+func ipow(base, exp int) int {
+	result := 1
+	for {
+		if exp&1 == 1 {
+			result *= base
+		}
+		exp >>= 1
+		if exp == 0 {
+			break
+		}
+		base *= base
 	}
-
-	return r
+	return result
 }
 
 func buildNumber(num int) string {
