@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,7 +15,6 @@ import (
 
 const (
 	filename = "measurements.txt"
-	lines    = 1_000_000_000
 )
 
 type TempCity struct {
@@ -29,29 +30,28 @@ func main() {
 
 	defer reader.Close()
 
-	workers := runtime.NumCPU() * 128
+	workers := runtime.NumCPU()
 
 	fmt.Println("Running with", workers, "workers")
 
-	chunkSize := lines / workers
+	chunkSize := reader.Len() / workers
 
-	// f, err := os.Create("profile.prof")
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// defer f.Close()
-	// if err := pprof.StartCPUProfile(f); err != nil {
-	// 	panic(err)
-	// }
-	// defer pprof.StopCPUProfile()
+	fmt.Printf("Using %d chunks of %d bytes", workers, chunkSize)
+
+	f, err := os.Create("profile.prof")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	if err := pprof.StartCPUProfile(f); err != nil {
+		panic(err)
+	}
+	defer pprof.StopCPUProfile()
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
 
-	results := make([]map[string]Result, workers)
-	for i := range results {
-		results[i] = map[string]Result{}
-	}
+	results := make(chan map[string]*Result, workers)
 
 	for w := range workers {
 		go func(w, start, end int) {
@@ -64,17 +64,19 @@ func main() {
 				}
 			}
 
+			result := map[string]*Result{}
+
 			for i := start; i < end; {
 				var b int
 				name, number, b := ReadLine(reader, i)
 				temperature := parseFloatIntoInt(number)
 
-				if v, ok := results[w][name]; !ok {
+				if v, ok := result[name]; !ok {
 					r := Result{
 						temperature, temperature, temperature, 1,
 					}
 
-					results[w][name] = r
+					result[name] = &r
 				} else {
 					v.Amount++
 					v.Sum += temperature
@@ -83,25 +85,29 @@ func main() {
 					} else if v.Max < temperature {
 						v.Max = temperature
 					}
-
-					results[w][name] = v
 				}
 
 				i += b + 1
 			}
 
+			results <- result
 			wg.Done()
 		}(w, w*chunkSize, w*chunkSize+chunkSize)
 	}
 
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	// results.Range(func(k string, v Result) bool {
 	// 	fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	// 	return true
 	// })
-	final := map[string]Result{}
+	final := map[string]*Result{}
 
-	for _, m := range results {
+	for m := range results {
+		fmt.Println("Received map")
 		for k, originalV := range m {
 			if finalV, ok := final[k]; ok {
 				if finalV.Max < originalV.Max {
@@ -121,7 +127,7 @@ func main() {
 	}
 
 	keys := []string{}
-	for k, _ := range final {
+	for k := range final {
 		keys = append(keys, k)
 	}
 
