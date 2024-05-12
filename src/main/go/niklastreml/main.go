@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -36,7 +37,7 @@ func main() {
 
 	chunkSize := reader.Len() / workers
 
-	fmt.Printf("Using %d chunks of %d bytes", workers, chunkSize)
+	fmt.Printf("Using %d chunks of %d bytes\n", workers, chunkSize)
 
 	f, err := os.Create("profile.prof")
 	if err != nil {
@@ -88,6 +89,10 @@ func main() {
 				}
 
 				i += b + 1
+
+				if i > chunkSize/3 {
+					break
+				}
 			}
 
 			results <- result
@@ -106,8 +111,10 @@ func main() {
 	// })
 	final := map[string]*Result{}
 
+	nDone := 0
 	for m := range results {
-		fmt.Println("Received map")
+		nDone++
+		fmt.Printf("Got results %d/%d\r", nDone, workers)
 		for k, originalV := range m {
 			if finalV, ok := final[k]; ok {
 				if finalV.Max < originalV.Max {
@@ -142,24 +149,28 @@ func main() {
 
 // ReadLine reads one line from reader and reads it into a name and number string
 // start should be the adress of the beginning of the line
-func ReadLine(reader *mmap.ReaderAt, start int) (string, string, int) {
+func ReadLine(reader *mmap.ReaderAt, start int) (string, [5]byte, int) {
 	nameBuilder := strings.Builder{}
-	numberBuilder := strings.Builder{}
+	// we need to write this in reverse
+	numberBuilder := [5]byte{}
 
-	nameBuilder.Grow(10)
-	// a number is at least 3 bytes long
-	numberBuilder.Grow(3)
+	nameBuilder.Grow(50)
 	nameDone := false
 
 	readBytes := 0
+	nI := 4
 	for ; ; readBytes++ {
 		b := reader.At(start + readBytes)
 		if b == '\n' {
 			break
 		}
 		if b != ';' {
+			if b == '.' {
+				continue
+			}
 			if nameDone {
-				numberBuilder.WriteByte(b)
+				numberBuilder[nI] = b
+				nI--
 				continue
 			} else {
 				nameBuilder.WriteByte(b)
@@ -169,23 +180,44 @@ func ReadLine(reader *mmap.ReaderAt, start int) (string, string, int) {
 		}
 	}
 
-	return nameBuilder.String(), numberBuilder.String(), readBytes
+	return nameBuilder.String(), numberBuilder, readBytes
 }
 
-func parseFloatIntoInt(f string) int {
-	s := strings.Builder{}
-	for _, c := range f {
-		if c != '.' {
-			s.WriteRune(c)
+func parseFloatIntoInt(f [5]byte) int {
+	asInt := 0
+	var zero byte = '0'
+
+	mult := 0
+	negative := false
+	for _, b := range f {
+		if b == 0 {
+			continue
 		}
+		if b == '-' {
+			negative = true
+			continue
+		}
+		scalar := b - zero
+		asInt += int(float64(scalar) * math.Pow(float64(10), float64(mult)))
+		mult++
 	}
 
-	i, err := strconv.ParseInt(s.String(), 10, 32)
-	if err != nil {
-		panic(err)
+	if negative {
+		asInt = -asInt
 	}
 
-	return int(i)
+
+	return asInt
+}
+
+func Pow(n, exp int) int {
+	r := 0
+
+	for range exp {
+		r += n * n
+	}
+
+	return r
 }
 
 func buildNumber(num int) string {
