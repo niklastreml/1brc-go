@@ -38,6 +38,10 @@ func main() {
 
 	fmt.Printf("Using %d chunks of %d bytes\n", workers, chunkSize)
 
+	prealloc := chunkSize / 1500
+
+	fmt.Printf("Pre allocating %d map keys\n", prealloc)
+
 	f, err := os.Create("profile.prof")
 	if err != nil {
 		panic(err)
@@ -66,7 +70,7 @@ func main() {
 				}
 			}
 
-			result := map[string]*Result{}
+			result := make(map[string]*Result, prealloc) // map[string]*Result{}
 
 			for i := start; i < end; {
 				var b int
@@ -92,7 +96,7 @@ func main() {
 				i += b + 1
 
 				// reduce for testing
-				// if i > chunkSize/3 {
+				// if i > chunkSize/10 {
 				// 	break
 				// }
 			}
@@ -111,7 +115,7 @@ func main() {
 	// 	fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	// 	return true
 	// })
-	final := map[string]*Result{}
+	final := make(map[string]*Result, prealloc)
 
 	nDone := 0
 	for m := range results {
@@ -246,51 +250,3 @@ type Result struct {
 	Sum    int
 	Amount int
 }
-
-func ParseLine(s string) (station string, measurement int64) {
-	parts := strings.Split(s, ";")
-
-	station = parts[0]
-
-	num := []rune{}
-	for _, c := range parts[1] {
-		if c == '.' {
-			continue
-		}
-		num = append(num, c)
-	}
-
-	var err error
-	if measurement, err = strconv.ParseInt(string(num), 10, 32); err != nil {
-		panic(err)
-	}
-	return station, measurement
-}
-
-type Map[K comparable, V any] struct {
-	m sync.Map
-}
-
-func (m *Map[K, V]) Delete(key K) { m.m.Delete(key) }
-func (m *Map[K, V]) Load(key K) (value V, ok bool) {
-	v, ok := m.m.Load(key)
-	if !ok {
-		return value, ok
-	}
-	return v.(V), ok
-}
-func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
-	v, loaded := m.m.LoadAndDelete(key)
-	if !loaded {
-		return value, loaded
-	}
-	return v.(V), loaded
-}
-func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	a, loaded := m.m.LoadOrStore(key, value)
-	return a.(V), loaded
-}
-func (m *Map[K, V]) Range(f func(key K, value V) bool) {
-	m.m.Range(func(key, value any) bool { return f(key.(K), value.(V)) })
-}
-func (m *Map[K, V]) Store(key K, value V) { m.m.Store(key, value) }
