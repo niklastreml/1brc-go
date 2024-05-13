@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"hash"
-	"hash/fnv"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -127,7 +126,7 @@ func main() {
 	nDone := 0
 	for m := range results {
 		nDone++
-		fmt.Printf("Got results %d/%d\r", nDone, workers)
+		// fmt.Printf("Got results %d/%d\r", nDone, workers)
 		for k, originalV := range m.Data {
 			if finalV := final[k]; finalV != nil {
 				if finalV.Max < originalV.Max {
@@ -295,15 +294,6 @@ func (h *HashMap) Store(d *Result) {
 
 func (h *HashMap) Load(addr, length int) *Result {
 	return h.Data[h.hashfnv(addr, length)]
-}
-
-func (h *HashMap) hash(addr, length int) uint64 {
-	hfn := fnv.New64()
-	for i := range length {
-		b := h.Reader.At(addr + i)
-		hfn.Write([]byte{b})
-	}
-	return hfn.Sum64() % numKeys
 }
 
 const prime64 = 1099511628211
