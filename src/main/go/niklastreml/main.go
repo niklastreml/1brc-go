@@ -2,19 +2,20 @@ package main
 
 import (
 	"fmt"
+	"hash"
+	"hash/fnv"
 	"os"
 	"runtime"
 	"runtime/pprof"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 
 	"golang.org/x/exp/mmap"
 )
 
 const (
-	filename = "measurements.txt"
+	filename        = "measurements.txt"
+	numKeys  uint64 = 413
 )
 
 type TempCity struct {
@@ -31,6 +32,7 @@ func main() {
 	defer reader.Close()
 
 	workers := runtime.NumCPU() * 128
+	// workers := 3
 
 	fmt.Println("Running with", workers, "workers")
 
@@ -38,9 +40,9 @@ func main() {
 
 	fmt.Printf("Using %d chunks of %d bytes\n", workers, chunkSize)
 
-	prealloc := chunkSize / 1500
+	// prealloc := chunkSize / 1500
 
-	fmt.Printf("Pre allocating %d map keys\n", prealloc)
+	// fmt.Printf("Pre allocating %d map keys\n", prealloc)
 
 	f, err := os.Create("profile.prof")
 	if err != nil {
@@ -55,7 +57,7 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(workers)
 
-	results := make(chan map[string]*Result, workers)
+	results := make(chan HashMap, workers)
 
 	for w := range workers {
 		go func(w, start, end int) {
@@ -70,19 +72,24 @@ func main() {
 				}
 			}
 
-			result := make(map[string]*Result, prealloc) // map[string]*Result{}
+			// result := make(map[string]*Result, prealloc) // map[string]*Result{}
+			//result := make([]*Result, numKeys)
+			result := HashMap{
+				Data:   make([]*Result, numKeys),
+				Reader: reader,
+			}
 
 			for i := start; i < end; {
 				var b int
-				name, number, b := ReadLine(reader, i)
-				temperature := parseFloatIntoInt(number)
+				nameLength, number, b := ReadLine(reader, i)
+				temperature := ParseFloatIntoInt(number)
 
-				if v, ok := result[name]; !ok {
+				if v := result.Load(i, nameLength); v == nil {
 					r := Result{
-						temperature, temperature, temperature, 1,
+						i, nameLength, temperature, temperature, temperature, 1,
 					}
 
-					result[name] = &r
+					result.Store(&r)
 				} else {
 					v.Amount++
 					v.Sum += temperature
@@ -96,7 +103,7 @@ func main() {
 				i += b + 1
 
 				// reduce for testing
-				// if i > chunkSize/10 {
+				// if i > chunkSize/100 {
 				// 	break
 				// }
 			}
@@ -115,14 +122,14 @@ func main() {
 	// 	fmt.Printf("%s;%.2f;%.2f;%.2f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	// 	return true
 	// })
-	final := make(map[string]*Result, prealloc)
+	final := make([]*Result, numKeys)
 
 	nDone := 0
 	for m := range results {
 		nDone++
 		fmt.Printf("Got results %d/%d\r", nDone, workers)
-		for k, originalV := range m {
-			if finalV, ok := final[k]; ok {
+		for k, originalV := range m.Data {
+			if finalV := final[k]; finalV != nil {
 				if finalV.Max < originalV.Max {
 					finalV.Max = originalV.Max
 				}
@@ -139,28 +146,65 @@ func main() {
 		}
 	}
 
-	keys := []string{}
-	for k := range final {
-		keys = append(keys, k)
-	}
+	slices.SortFunc(final, func(a, b *Result) int {
+		// ensure nil go to the end of the array
+		if a == nil {
+			return 1
+		}
+		if b == nil {
+			return -1
+		}
+		swapped := 1
+		if a.NameLength > b.NameLength {
+			a, b = b, a
+			swapped = -1
+		}
 
-	slices.Sort(keys)
+		for i := range a.NameLength {
+			aName := a.NameAddr + i
+			bName := b.NameAddr + i
 
-	for _, k := range keys {
-		v, _ := final[k]
-		fmt.Printf("%s;%.1f;%.1f;%.1f\n", k, float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
+			aByte, bByte := reader.At(aName), reader.At(bName)
+			if aByte < bByte {
+				return -1 * swapped
+			} else if aByte > bByte {
+				return 1 * swapped
+			}
+		}
+
+		if b.NameLength > a.NameLength {
+			// special case where a is a substring of b
+			// a = "Hamburg"
+			// b = "Hamburger"
+			// since a is always less than b, we declare that the longer string 'b' should be sorted
+			// after the shorter string 'a'
+			return -1
+		}
+		return 0
+	})
+
+	// allocate a buffer of 50 bytes for the read at which we can reuse
+	b := make([]byte, 50)
+	for _, v := range final {
+		// if v is nil, no more data will come after it
+		if v == nil {
+			break
+		}
+		reader.ReadAt(b, int64(v.NameAddr))
+		fmt.Printf("%s;%.1f;%.1f;%.1f\n", b[:v.NameLength], float32(v.Min)/10, float32(v.Sum/v.Amount)/10, float32(v.Max)/10)
 	}
 
 }
 
 // ReadLine reads one line from reader and reads it into a name and number string
 // start should be the adress of the beginning of the line
-func ReadLine(reader *mmap.ReaderAt, start int) (string, [5]byte, int) {
-	nameBuilder := strings.Builder{}
+// the first is the length of the name
+// the second is the read number without decimals and in reverse
+// the last is the number of bytes read in total, for advancing the read pointer
+func ReadLine(reader *mmap.ReaderAt, start int) (int, [5]byte, int) {
 	// we need to write this in reverse
 	numberBuilder := [5]byte{}
-
-	nameBuilder.Grow(50)
+	nameLength := 0
 	nameDone := false
 
 	readBytes := 0
@@ -179,17 +223,17 @@ func ReadLine(reader *mmap.ReaderAt, start int) (string, [5]byte, int) {
 				nI--
 				continue
 			} else {
-				nameBuilder.WriteByte(b)
+				nameLength++
 			}
 		} else {
 			nameDone = true
 		}
 	}
 
-	return nameBuilder.String(), numberBuilder, readBytes
+	return nameLength, numberBuilder, readBytes
 }
 
-func parseFloatIntoInt(f [5]byte) int {
+func ParseFloatIntoInt(f [5]byte) int {
 	asInt := 0
 	var zero byte = '0'
 
@@ -230,23 +274,47 @@ func ipow(base, exp int) int {
 	return result
 }
 
-func buildNumber(num int) string {
-	b := strings.Builder{}
-	b.Grow(4)
-	s := strconv.FormatInt(int64(num/10), 10)
-
-	b.WriteString(s)
-	b.WriteByte('.')
-
-	v := (num % 10) + '0'
-	b.WriteByte(byte(v))
-
-	return b.String()
+type Result struct {
+	NameAddr   int
+	NameLength int
+	Min        int
+	Max        int
+	Sum        int
+	Amount     int
 }
 
-type Result struct {
-	Min    int
-	Max    int
-	Sum    int
-	Amount int
+type HashMap struct {
+	Data   []*Result
+	Reader *mmap.ReaderAt
+	h      hash.Hash64
+}
+
+func (h *HashMap) Store(d *Result) {
+	h.Data[h.hashfnv(d.NameAddr, d.NameLength)] = d
+}
+
+func (h *HashMap) Load(addr, length int) *Result {
+	return h.Data[h.hashfnv(addr, length)]
+}
+
+func (h *HashMap) hash(addr, length int) uint64 {
+	hfn := fnv.New64()
+	for i := range length {
+		b := h.Reader.At(addr + i)
+		hfn.Write([]byte{b})
+	}
+	return hfn.Sum64() % numKeys
+}
+
+const prime64 = 1099511628211
+
+func (h *HashMap) hashfnv(addr, length int) uint64 {
+	var hash uint64 = 0
+
+	for i := range length {
+		hash ^= uint64(h.Reader.At(addr + i))
+		hash *= prime64
+	}
+
+	return hash % numKeys
 }
